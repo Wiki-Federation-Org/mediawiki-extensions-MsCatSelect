@@ -7,80 +7,80 @@ use MediaWiki\Output\OutputPage;
 
 class MsCatSelect {
 
-	public static function onResourceLoaderGetConfigVars( array &$vars, string $skin, Config $config ) {
-		$mainCategories = $config->get( 'MSCS_MainCategories' );
-		$useNiceDropdown = $config->get( 'MSCS_UseNiceDropdown' );
-		$warnNoCategories = $config->get( 'MSCS_WarnNoCategories' );
-		$warnNoCategoriesException = $config->get( 'MSCS_WarnNoCategoriesException' );
-		$vars['wgMSCS_MainCategories'] = $mainCategories;
-		$vars['wgMSCS_UseNiceDropdown'] = $useNiceDropdown;
-		$vars['wgMSCS_WarnNoCategories'] = str_replace( ' ', '_', $warnNoCategories );
-		$vars['wgMSCS_WarnNoCategoriesException'] = str_replace( ' ', '_', $warnNoCategoriesException );
-	}
+    public static function onResourceLoaderGetConfigVars(array &$vars, string $skin, Config $config) {
+        $mainCategories = $config->get('MSCS_MainCategories');
+        $useNiceDropdown = $config->get('MSCS_UseNiceDropdown');
+        $warnNoCategories = $config->get('MSCS_WarnNoCategories');
+        $warnNoCategoriesException = $config->get('MSCS_WarnNoCategoriesException');
 
-	/**
-	 * Entry point for the hook and main worker function for editing the page.
-	 *
-	 * @param EditPage $editPage
-	 * @param OutputPage $output
-	 */
-	public static function onShowEditFormInitial( EditPage $editPage, OutputPage $output ) {
-		$output->addModules( 'ext.MsCatSelect' );
-		self::cleanTextbox( $editPage );
-	}
+        // Sanitize config values for JS context
+        $vars['wgMSCS_MainCategories'] = is_array($mainCategories) ? array_map('strval', $mainCategories) : [];
+        $vars['wgMSCS_UseNiceDropdown'] = (bool)$useNiceDropdown;
+        $vars['wgMSCS_WarnNoCategories'] = is_array($warnNoCategories) ? array_map('strval', $warnNoCategories) : [];
+        $vars['wgMSCS_WarnNoCategoriesException'] = is_array($warnNoCategoriesException) ? array_map('strval', $warnNoCategoriesException) : [];
+    }
 
-	/**
-	 * Entry point for the hook and main worker function for saving the page.
-	 *
-	 * @param EditPage $editPage
-	 */
-	public static function onAttemptSave( EditPage $editPage ) {
-		// Get localised namespace string
-		$language = MediaWikiServices::getInstance()->getContentLanguage();
-		$categoryNamespace = $language->getNsText( NS_CATEGORY );
+    /**
+     * Add JS module to the edit page
+     */
+    public static function onShowEditFormInitial(EditPage $editPage, OutputPage $output) {
+        $output->addModules('ext.MsCatSelect');
+        self::cleanTextbox($editPage);
+    }
 
-		// Iterate through all selected category entries:
-		$categories = $editPage->getContext()->getRequest()->getArray( 'SelectCategoryList', [] );
-		$text = implode( "\n", array_map( static function ( string $category ) use ( $categoryNamespace ) {
-			// If the sort key is empty, remove it
-			$category = rtrim( $category, '|' );
-			return "[[{$categoryNamespace}:{$category}]]";
-		}, $categories ) );
+    /**
+     * Append selected categories safely on save
+     */
+    public static function onAttemptSave(EditPage $editPage) {
+        $language = MediaWikiServices::getInstance()->getContentLanguage();
+        $categoryNamespace = $language->getNsText(NS_CATEGORY);
 
-		if ( $text !== '' ) {
-			$editPage->textbox1 .= "\n\n{$text}";
-		}
-	}
+        $categories = $editPage->getContext()->getRequest()->getArray('SelectCategoryList', []);
 
-	/**
-	 * Remove the old category tag from the text the user views in the editbox.
-	 *
-	 * @param EditPage $editPage
-	 */
-	private static function cleanTextbox( EditPage $editPage ) {
-		// Get localised namespace string
-		$language = MediaWikiServices::getInstance()->getContentLanguage();
-		$categoryNamespace = $language->getNsText( NS_CATEGORY );
+        $safeCategories = [];
+        foreach ($categories as $category) {
+            // Remove sortkey if empty, sanitize string
+            $category = rtrim($category, '|');
+            $category = self::sanitizeCategory($category);
+            if ($category !== '') {
+                $safeCategories[] = "[[{$categoryNamespace}:{$category}]]";
+            }
+        }
 
-		// The regular expression to find the category links
-		$pattern = "\[\[({$categoryNamespace}):([^\|\]]*)(\|[^\|\]]*)?\]\]";
+        if ($safeCategories) {
+            $editPage->textbox1 .= "\n\n" . implode("\n", $safeCategories);
+        }
+    }
 
-		// Don't remove categories in Semantic MediaWiki #ask queries
-		// https://www.mediawiki.org/wiki/Topic:Uxnm9nzhdhhypum9
-		$pattern = "(?<!#ask:)" . $pattern;
+    /**
+     * Remove old category tags from edit textbox
+     */
+    private static function cleanTextbox(EditPage $editPage) {
+        $language = MediaWikiServices::getInstance()->getContentLanguage();
+        $categoryNamespace = preg_quote($language->getNsText(NS_CATEGORY), '/');
 
-		// The container to store the processed text
-		$cleanText = '';
+        // Regex: match [[Category:Name|SortKey]], excluding #ask queries
+        $pattern = "(?<!#ask:)\[\[{$categoryNamespace}:([^\|\]]*)(\|[^\|\]]*)?\]\]";
 
-		$editText = $editPage->textbox1;
+        $editText = $editPage->textbox1;
+        $lines = explode("\n", $editText);
+        $cleanLines = [];
 
-		// Remove category links line by line
-		$textLines = explode( "\n", $editText );
-		foreach ( $textLines as $textLine ) {
-			$cleanText .= preg_replace( "/{$pattern}/i", "", $textLine ) . "\n";
-		}
+        foreach ($lines as $line) {
+            $cleanLines[] = preg_replace("/{$pattern}/i", '', $line);
+        }
 
-		// Place the cleaned text into the text box
-		$editPage->textbox1 = trim( $cleanText );
-	}
+        $editPage->textbox1 = trim(implode("\n", $cleanLines));
+    }
+
+    /**
+     * Sanitize category string to prevent malformed wikitext or injection
+     */
+    private static function sanitizeCategory(string $category): string {
+        // Remove control chars, newlines, pipe, closing brackets
+        $category = str_replace(["\n", "\r", '|', ']]'], '', $category);
+        $category = trim($category);
+        // Limit length to prevent very long categories
+        return mb_substr($category, 0, 255);
+    }
 }
